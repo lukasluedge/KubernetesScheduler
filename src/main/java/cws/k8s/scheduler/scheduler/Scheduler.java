@@ -584,6 +584,14 @@ public abstract class Scheduler implements Informable {
         return new LinkedList<>( upcomingTasks );
     }
 
+    public Task getTask( int id ){
+        synchronized (tasksById){
+            return tasksById.get( id );
+        }
+    }
+
+
+
     /**
      * Close used resources
      */

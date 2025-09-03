@@ -17,11 +17,13 @@ import cws.k8s.scheduler.rest.response.getfile.FileResponse;
 import cws.k8s.scheduler.util.DaemonHolder;
 import cws.k8s.scheduler.util.copying.CurrentlyCopying;
 import cws.k8s.scheduler.util.copying.CurrentlyCopyingOnNode;
+import cws.k8s.scheduler.local.AdminClusterService;
 import io.fabric8.kubernetes.api.model.Node;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.client.Watcher;
 import lombok.AccessLevel;
 import lombok.Getter;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.net.ftp.FTPClient;
 
@@ -30,6 +32,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+
 
 @Slf4j
 public abstract class SchedulerWithDaemonSet extends Scheduler {
@@ -44,6 +47,7 @@ public abstract class SchedulerWithDaemonSet extends Scheduler {
     final String localWorkDir;
     protected final PublishManager publishManager;
     private final static long MAX_SIZE_TO_PUBLISH = 2L * 1024 * 1024 * 1024; // 2GB
+    private final AdminClusterService service;
 
     /**
      * Which node is currently copying files from which node
@@ -55,6 +59,7 @@ public abstract class SchedulerWithDaemonSet extends Scheduler {
         super(execution, client, namespace, config);
         this.hierarchyWrapper = new HierarchyWrapper( config.localWorkDir );
         this.inputFileCollector = new InputFileCollector( hierarchyWrapper );
+        this.service = new AdminClusterService(client);
         if ( config.copyStrategy == null ) {
             throw new IllegalArgumentException( "Copy strategy is null" );
         }
@@ -279,8 +284,14 @@ public abstract class SchedulerWithDaemonSet extends Scheduler {
     }
 
     public void setWorkflowEngineNode( String ip ){
-        this.workflowEngineNode = client.getPodByIp( ip ).getSpec().getNodeName();
-        log.info( "WorkflowEngineNode was set to {}", workflowEngineNode );
+        if (Objects.equals(System.getenv("MODE"), "real")){
+            this.workflowEngineNode = client.getPodByIp( ip ).getSpec().getNodeName();
+            log.info( "WorkflowEngineNode was set to {}", workflowEngineNode );
+        } else if (Objects.equals(System.getenv("MODE"), "mock")) {
+            service.createNode("WfEngineNode", "4", "32Gi", null);
+            this.workflowEngineNode = "WfEngineNode";
+        }
+
     }
 
     @Override

@@ -4,9 +4,7 @@ import cws.k8s.scheduler.client.CWSKubernetesClient;
 import cws.k8s.scheduler.dag.DAG;
 import cws.k8s.scheduler.dag.InputEdge;
 import cws.k8s.scheduler.dag.Vertex;
-import cws.k8s.scheduler.model.SchedulerConfig;
-import cws.k8s.scheduler.model.TaskConfig;
-import cws.k8s.scheduler.model.TaskMetrics;
+import cws.k8s.scheduler.model.*;
 import cws.k8s.scheduler.publishDir.PublishItem;
 import cws.k8s.scheduler.rest.exceptions.NotARealFileException;
 import cws.k8s.scheduler.rest.response.getfile.FileResponse;
@@ -27,6 +25,7 @@ import cws.k8s.scheduler.scheduler.nodeassign.RoundRobinAssign;
 import cws.k8s.scheduler.scheduler.prioritize.*;
 import cws.k8s.scheduler.util.score.FileSizeRankScore;
 import cws.k8s.scheduler.util.score.LFFFileSizeRankScore;
+import io.fabric8.kubernetes.api.model.Pod;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -47,6 +46,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @RestController
 @Slf4j
@@ -241,7 +241,41 @@ public class SchedulerRestController {
             return noSchedulerFor( execution );
         }
 
-        scheduler.addTask( id, config );
+        if (Objects.equals(System.getenv("MODE"), "mock")) {
+            log.info("made it into mock mode");
+            // Basis-Validierungen
+            if (config.getRunName() == null || config.getRunName().isBlank()) {
+                return new ResponseEntity<>("runName must be set (unique task identifier / future pod name)", HttpStatus.BAD_REQUEST);
+            }
+            if (config.getTask() == null || config.getTask().isBlank()) {
+                return new ResponseEntity<>("task (process label) must be set", HttpStatus.BAD_REQUEST);
+            }
+
+            // Task registrieren
+            scheduler.addTask(id, config);
+
+            // Task-Objekt zurückholen (Accessor in Scheduler hinzugefügt)
+            final Task task = scheduler.getTask(id);
+            if (task == null) {
+                return new ResponseEntity<>("Internal error: task not retrievable after addTask", HttpStatus.INTERNAL_SERVER_ERROR);
+            }
+
+            // Simulations-Pod nur erzeugen, wenn Task noch keinen Pod hat
+            if (task.getPod() == null) {
+                try {
+                    Pod simulated = client.buildSimulatedPodForTask(task, scheduler);
+                    client.pods().inNamespace(scheduler.getNamespace()).resource(simulated).create();
+                    // schedulePod erwartet PodWithAge
+                    PodWithAge pwa = new PodWithAge(simulated);
+//                    scheduler.schedulePod(pwa);
+                    log.info("Simulated pod scheduled for task {} (runName={})", id, config.getRunName());
+                } catch (Exception e) {
+                    log.warn("Could not simulate pod for task {}: {}", id, e.getMessage(), e);
+                    return new ResponseEntity<>("Failed to simulate pod: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+                }
+            }
+
+        }
         Map<String, Object> schedulerParams = scheduler.getSchedulerParams( config.getTask(), config.getName() );
 
         return new ResponseEntity<>( schedulerParams, HttpStatus.OK );
@@ -558,6 +592,7 @@ public class SchedulerRestController {
     ResponseEntity<String> addVertices( @PathVariable String execution, @RequestBody List<Vertex> vertices ) {
 
         log.trace( "submit vertices: {}", vertices );
+        log.info( "submit vertices: {}", vertices );
 
         final Scheduler scheduler = schedulerHolder.get( execution );
         if ( scheduler == null ) {
@@ -637,5 +672,7 @@ public class SchedulerRestController {
         return new ResponseEntity<>( HttpStatus.OK );
 
     }
+
+
 
 }
