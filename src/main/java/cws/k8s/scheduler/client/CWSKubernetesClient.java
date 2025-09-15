@@ -43,6 +43,7 @@ public class CWSKubernetesClient implements AutoCloseable {
         for( Node node : this.nodes().list().getItems() ){
             nodeHolder.put( node.getMetadata().getName(), new NodeWithAlloc(node,this) );
         }
+
         podInform = this.pods().inAnyNamespace().inform( new PodHandler( this ) );
         nodeInform = this.nodes().inform( new NodeHandler( this ) );
         log.info("Old client");
@@ -52,6 +53,9 @@ public class CWSKubernetesClient implements AutoCloseable {
     public CWSKubernetesClient(KubernetesClient client) {
         this.client = client;
         log.info("CWSKubernetesClient: injizierter Client: {}", client.getClass().getName());
+        for (Node node : this.nodes().list().getItems()) {
+            nodeHolder.put(node.getMetadata().getName(), new NodeWithAlloc(node, this));
+        }
         initInformers();
     }
 
@@ -88,8 +92,9 @@ public class CWSKubernetesClient implements AutoCloseable {
                 .filter(pod -> ip.equals(pod.getStatus().getPodIP()))
                 .findFirst()
                 .orElseGet(() -> {
-                    log.warn("No Pod found for IP: {}", ip);
-//                    System.out.println("This is a test print");
+                    if (!System.getenv("MODE").equals("mock")) {
+                        log.warn("No Pod found for IP: {}", ip);
+                    }
                     return null;
                 });
     }
@@ -123,6 +128,7 @@ public class CWSKubernetesClient implements AutoCloseable {
     private void informAllNewNode(NodeWithAlloc node) {
         for (Informable informable : informables) {
             informable.newNode(node);
+            log.debug("Informable {} received new node {}", informable.getClass().getName(), node.getName());
         }
     }
 
@@ -144,6 +150,17 @@ public class CWSKubernetesClient implements AutoCloseable {
                 Thread.currentThread().interrupt();
             }
             try {
+                if ("mock".equalsIgnoreCase(System.getenv("MODE"))) {
+                    client.pods()
+                            .inNamespace(pod.getMetadata().getNamespace())
+                            .withName(pod.getMetadata().getName())
+                            .edit(p -> new PodBuilder(p)
+                                    .editOrNewSpec()
+                                    .withNodeName(node)
+                                    .endSpec()
+                                    .build());
+                    return;
+                }
                 final NodeWithAlloc nodeWithAlloc = nodeHolder.get(node);
                 final Binding build = new BindingBuilder()
                         .withNewMetadata().withName(pod.getName()).endMetadata()
@@ -156,6 +173,9 @@ public class CWSKubernetesClient implements AutoCloseable {
                         .inNamespace(pod.getMetadata().getNamespace())
                         .resource(build)
                         .create();
+
+
+
                 return;
             } catch (KubernetesClientException e) {
                 if (e.getStatus() != null &&

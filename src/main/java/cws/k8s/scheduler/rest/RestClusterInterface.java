@@ -136,9 +136,9 @@ public class RestClusterInterface {
        ============================================================= */
 
     @PostMapping("/cluster/node")
-    public ResponseEntity<?> createNode(@RequestBody CreateNodeRequest req) {
+    public ResponseEntity<?> createOrUpdateNode(@RequestBody CreateNodeRequest req) {
         return ResponseEntity.ok(
-                service.createNode(
+                service.createOrUpdateNode(
                         req.name(),
                         req.cpu(),
                         req.memory(),
@@ -192,6 +192,10 @@ public class RestClusterInterface {
                 ? ResponseEntity.ok(Map.of("deleted", name, "namespace", namespace))
                 : ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(Map.of("deleted", false, "pod", name));
+    }
+    @DeleteMapping("/cluster/reset")
+    public ResponseEntity<?> resetCluster() {
+        return ResponseEntity.ok(service.resetCluster());
     }
 
     /* =============================================================

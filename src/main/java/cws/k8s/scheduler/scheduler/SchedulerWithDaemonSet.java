@@ -288,7 +288,7 @@ public abstract class SchedulerWithDaemonSet extends Scheduler {
             this.workflowEngineNode = client.getPodByIp( ip ).getSpec().getNodeName();
             log.info( "WorkflowEngineNode was set to {}", workflowEngineNode );
         } else if (Objects.equals(System.getenv("MODE"), "mock")) {
-            service.createNode("WfEngineNode", "4", "32Gi", null);
+            service.createOrUpdateNode("WfEngineNode", "4", "32Gi", null);
             this.workflowEngineNode = "WfEngineNode";
         }
 

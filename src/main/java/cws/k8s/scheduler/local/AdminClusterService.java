@@ -6,6 +6,7 @@ import cws.k8s.scheduler.client.CWSKubernetesClient;
 import cws.k8s.scheduler.model.TaskConfig;
 import cws.k8s.scheduler.scheduler.Scheduler;
 import io.fabric8.kubernetes.api.model.*;
+import io.fabric8.kubernetes.client.dsl.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -103,10 +104,10 @@ public class AdminClusterService {
     }
 
     // ---------------- Nodes ----------------
-    public Map<String, Object> createNode(String name,
-                                          String cpu,
-                                          String memory,
-                                          Map<String, String> labels) {
+    public Map<String, Object> createOrUpdateNode(String name,
+                                                  String cpu,
+                                                  String memory,
+                                                  Map<String, String> labels) {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Node name required");
         }
@@ -119,17 +120,41 @@ public class AdminClusterService {
         );
         Map<String, Quantity> capacity = alloc;
 
+        Map<String, String> effectiveLabels = new HashMap<>();
+        if (labels != null) effectiveLabels.putAll(labels);
+        effectiveLabels.putIfAbsent("kubernetes.io/hostname", name);
+        effectiveLabels.putIfAbsent("kubernetes.io/os", "linux");
+        effectiveLabels.putIfAbsent("kubernetes.io/arch", "amd64");
+
+        Node existing = client.nodes().withName(name).get();
+
+        if (existing != null) {
+            client.nodes().withName(name).delete(); }
+        // Node does not exist; create as before
         NodeBuilder nb = new NodeBuilder()
-                .withNewMetadata().withName(name).withLabels(labels == null ? Map.of() : labels).endMetadata()
+                .withNewMetadata()
+                .withName(name)
+                .withLabels(effectiveLabels)
+                .endMetadata()
+                .withNewSpec()
+                .withUnschedulable(false)
+                .endSpec()
                 .withNewStatus()
                 .withAllocatable(alloc)
                 .withCapacity(capacity)
+                .addNewCondition()
+                .withType("Ready")
+                .withStatus("True")
+                .withReason("Mock")
+                .withMessage("Mock node is ready")
+                .endCondition()
                 .endStatus();
 
         Node node = nb.build();
         client.nodes().resource(node).create();
         log.info("Created mock node {}", name);
         return Map.of("created", name, "cpu", cpuVal, "memory", memVal);
+
     }
 
     public boolean deleteNode(String name) {
@@ -196,7 +221,7 @@ public class AdminClusterService {
                 .endMetadata()
                 .withNewSpec()
                 .withNodeName(nodeName)
-                .withNodeSelector(nodeSelector == null ? null : nodeSelector)
+                .withNodeSelector(nodeSelector)
                 .withContainers(cb.build())
                 .endSpec()
                 .withNewStatus()
@@ -207,12 +232,25 @@ public class AdminClusterService {
         Pod pod = pb.build();
         client.pods().inNamespace(ns).resource(pod).create();
         log.info("Created mock pod {} in ns={} (node={})", name, ns, nodeName);
-        return Map.of("created", name, "namespace", ns, "node", nodeName);
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("created", name);
+        resp.put("namespace", ns);
+        resp.put("node", nodeName); // erlaubt null in der Map
+        return resp;
+
     }
 
     public boolean deletePod(String namespace, String name) {
         var res = client.pods().inNamespace(namespace).withName(name).delete();
         return res != null && !res.isEmpty();
+    }
+
+    // Pod aus dem Cluster abrufen (für PodWithAge etc.)
+    public Pod getPod(String namespace, String name) {
+        if (namespace == null || namespace.isBlank()) {
+            namespace = "default";
+        }
+        return client.pods().inNamespace(namespace).withName(name).get();
     }
 
     // ---------------- Cluster info ----------------
@@ -229,9 +267,9 @@ public class AdminClusterService {
             return Map.<String, Object>of(
                     "name", p.getMetadata().getName(),
                     "namespace", p.getMetadata().getNamespace(),
-                    "node", node,
-                    "phase", phase,
-                    "ip", ip
+                    "node", node != null ? node : "null",
+                    "phase", phase != null ? phase : "null",
+                    "ip", ip != null ? ip : "null"
             );
         }).collect(Collectors.toList());
     }
@@ -272,9 +310,9 @@ public class AdminClusterService {
         out.put("pods", pods.stream().map(p -> Map.of(
                 "name", p.getMetadata().getName(),
                 "namespace", p.getMetadata().getNamespace(),
-                "node", p.getSpec() != null ? p.getSpec().getNodeName() : null,
-                "phase", p.getStatus() != null ? p.getStatus().getPhase() : null,
-                "ip", p.getStatus() != null ? p.getStatus().getPodIP() : null
+                "node", p.getSpec() != null ? (p.getSpec().getNodeName() != null ? p.getSpec().getNodeName(): "null")  : "null",
+                "phase", p.getStatus() != null ? p.getStatus().getPhase() : "null",
+                "ip", p.getStatus() != null ? p.getStatus().getPodIP() : "null"
         )).toList());
 
         // Optional Task States
@@ -306,6 +344,42 @@ public class AdminClusterService {
         }
 
         return out;
+    }
+
+    public String resetCluster() {
+        // 1) Delete all Pods in all namespaces first (grace=0, background)
+        List<Pod> pods = client.pods().inAnyNamespace().list().getItems();
+        for (Pod pod : pods) {
+            client.pods()
+                    .inNamespace(pod.getMetadata().getNamespace())
+                    .withName(pod.getMetadata().getName())
+                    .withGracePeriod(0)
+                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
+                    .delete();
+        }
+        // Wait until all pods are gone (up to ~3 seconds)
+        long waitUntil = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < waitUntil) {
+            if (client.pods().inAnyNamespace().list().getItems().isEmpty()) break;
+            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+        }
+
+        // 2) Delete all Nodes after pods are gone
+        List<Node> nodes = client.nodes().list().getItems();
+        for (Node node : nodes) {
+            client.nodes().withName(node.getMetadata().getName())
+                    .withGracePeriod(0)
+                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
+                    .delete();
+        }
+        // Wait until all nodes are gone (up to ~3 seconds)
+        waitUntil = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < waitUntil) {
+            if (client.nodes().list().getItems().isEmpty()) break;
+            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+        }
+
+        return "Reset complete";
     }
 
     // ---------------- Tracking ----------------

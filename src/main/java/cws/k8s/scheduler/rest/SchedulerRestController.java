@@ -4,6 +4,7 @@ import cws.k8s.scheduler.client.CWSKubernetesClient;
 import cws.k8s.scheduler.dag.DAG;
 import cws.k8s.scheduler.dag.InputEdge;
 import cws.k8s.scheduler.dag.Vertex;
+import cws.k8s.scheduler.local.AdminClusterService;
 import cws.k8s.scheduler.model.*;
 import cws.k8s.scheduler.publishDir.PublishItem;
 import cws.k8s.scheduler.rest.exceptions.NotARealFileException;
@@ -31,6 +32,7 @@ import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -57,6 +59,8 @@ public class SchedulerRestController {
     private final boolean autoClose;
     private final ApplicationContext appContext;
     private long closedLastScheduler = -1;
+    private final AdminClusterService service;
+    private int ipIncrementer = 10;
 
     /**
      * Holds the scheduler for one execution
@@ -72,6 +76,7 @@ public class SchedulerRestController {
         this.client = client;
         this.autoClose = Boolean.parseBoolean(autoClose);
         this.appContext = appContext;
+        this.service = new AdminClusterService(client);
     }
 
     @Scheduled(fixedDelay = 5000)
@@ -231,19 +236,14 @@ public class SchedulerRestController {
      * @param config The config contains the task name, input files, and optional task parameter the scheduler has to determine
      * @return Parameters the scheduler suggests for the task
      */
-    @PostMapping("/v1/scheduler/{execution}/task/{id}")
-    ResponseEntity<? extends Object> registerTask( @PathVariable String execution, @PathVariable int id, @RequestBody TaskConfig config ) {
-
-        log.info( execution + " " + config.getTask() + " got: " + config );
-
-        final Scheduler scheduler = schedulerHolder.get( execution );
-        if ( scheduler == null ) {
-            return noSchedulerFor( execution );
+    // Helper to register a single task (reused by single and bulk endpoints)
+    private ResponseEntity<? extends Object> handleRegisterTask(Scheduler scheduler, int id, TaskConfig config) {
+        if (config == null) {
+            return new ResponseEntity<>("config must not be null", HttpStatus.BAD_REQUEST);
         }
+        log.info("{} {} got: {}", scheduler.getExecution(), config.getTask(), config);
 
         if (Objects.equals(System.getenv("MODE"), "mock")) {
-            log.info("made it into mock mode");
-            // Basis-Validierungen
             if (config.getRunName() == null || config.getRunName().isBlank()) {
                 return new ResponseEntity<>("runName must be set (unique task identifier / future pod name)", HttpStatus.BAD_REQUEST);
             }
@@ -251,35 +251,50 @@ public class SchedulerRestController {
                 return new ResponseEntity<>("task (process label) must be set", HttpStatus.BAD_REQUEST);
             }
 
-            // Task registrieren
             scheduler.addTask(id, config);
-
-            // Task-Objekt zurückholen (Accessor in Scheduler hinzugefügt)
             final Task task = scheduler.getTask(id);
             if (task == null) {
                 return new ResponseEntity<>("Internal error: task not retrievable after addTask", HttpStatus.INTERNAL_SERVER_ERROR);
             }
 
-            // Simulations-Pod nur erzeugen, wenn Task noch keinen Pod hat
+            int podIP = ipIncrementer++;
             if (task.getPod() == null) {
                 try {
-                    Pod simulated = client.buildSimulatedPodForTask(task, scheduler);
-                    client.pods().inNamespace(scheduler.getNamespace()).resource(simulated).create();
-                    // schedulePod erwartet PodWithAge
-                    PodWithAge pwa = new PodWithAge(simulated);
-//                    scheduler.schedulePod(pwa);
-                    log.info("Simulated pod scheduled for task {} (runName={})", id, config.getRunName());
+                    service.createPod(
+                            task.getConfig().getRunName(),
+                            scheduler.getNamespace(),
+                            null,
+                            null,
+                            null,
+                            Integer.toString(podIP),
+                            null,
+                            null,
+                            Float.toString(task.getConfig().getCpus()),
+                            Long.toString(task.getConfig().getMemoryInBytes())
+                    );
+                    PodWithAge pwa = new PodWithAge(client.getPodByIp(Integer.toString(podIP)));
+                    scheduler.schedulePod(pwa);
+                    log.info("Simulated pod scheduled for task {} (runName={})", id, config.getName());
                 } catch (Exception e) {
                     log.warn("Could not simulate pod for task {}: {}", id, e.getMessage(), e);
                     return new ResponseEntity<>("Failed to simulate pod: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
                 }
             }
-
+        } else {
+            // Non-mock: just add the task
+            scheduler.addTask(id, config);
         }
-        Map<String, Object> schedulerParams = scheduler.getSchedulerParams( config.getTask(), config.getName() );
+        Map<String, Object> schedulerParams = scheduler.getSchedulerParams(config.getTask(), config.getName());
+        return new ResponseEntity<>(schedulerParams, HttpStatus.OK);
+    }
 
-        return new ResponseEntity<>( schedulerParams, HttpStatus.OK );
-
+    @PostMapping("/v1/scheduler/{execution}/task/{id}")
+    ResponseEntity<? extends Object> registerTask(@PathVariable String execution, @PathVariable int id, @RequestBody TaskConfig config) {
+        final Scheduler scheduler = schedulerHolder.get(execution);
+        if (scheduler == null) {
+            return noSchedulerFor(execution);
+        }
+        return handleRegisterTask(scheduler, id, config);
     }
 
     @Operation(summary = "Submit task metrics after execution")
