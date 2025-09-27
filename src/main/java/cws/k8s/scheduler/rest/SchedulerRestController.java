@@ -45,10 +45,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.web.bind.annotation.*;
 
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 @RestController
 @Slf4j
@@ -295,6 +292,27 @@ public class SchedulerRestController {
             return noSchedulerFor(execution);
         }
         return handleRegisterTask(scheduler, id, config);
+    }
+
+    @PostMapping("v1/scheduler/{execution}/tasks")
+    ResponseEntity<? extends Object> registerTasks(@PathVariable String execution, @RequestBody List<BatchTaskConfig> configs) {
+        final Scheduler scheduler = schedulerHolder.get(execution);
+        if (scheduler == null) {
+            return noSchedulerFor(execution);
+        }
+
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (BatchTaskConfig config : configs) {
+            if (scheduler.getTask(config.id) == null) {
+                ResponseEntity<?> response = handleRegisterTask(scheduler, config.id, config.config);
+                if (!response.getStatusCode().is2xxSuccessful()) {
+                    return response;
+                }
+                results.add((Map<String, Object>) response.getBody());
+            }
+        }
+        return new ResponseEntity<>(results, HttpStatus.OK);
+
     }
 
     @Operation(summary = "Submit task metrics after execution")
@@ -607,7 +625,6 @@ public class SchedulerRestController {
     ResponseEntity<String> addVertices( @PathVariable String execution, @RequestBody List<Vertex> vertices ) {
 
         log.trace( "submit vertices: {}", vertices );
-        log.info( "submit vertices: {}", vertices );
 
         final Scheduler scheduler = schedulerHolder.get( execution );
         if ( scheduler == null ) {

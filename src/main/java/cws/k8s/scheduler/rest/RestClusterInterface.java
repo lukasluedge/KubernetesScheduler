@@ -91,21 +91,6 @@ public class RestClusterInterface {
        TASK ENDPOINTS
        ============================================================= */
 
-    @PostMapping("/scheduler/{execution}/task")
-    public ResponseEntity<?> addTask(@PathVariable String execution,
-                                     @RequestBody CreateTaskRequest req) {
-        return ResponseEntity.ok(
-                service.addTask(
-                        execution,
-                        req.id(),
-                        req.task(),
-                        req.name(),
-                        req.runName(),
-                        req.workDir()
-                )
-        );
-    }
-
     @DeleteMapping("/scheduler/{execution}/task/{id}")
     public ResponseEntity<?> removeTask(@PathVariable String execution,
                                         @PathVariable int id) {
@@ -184,15 +169,19 @@ public class RestClusterInterface {
         );
     }
 
-    @DeleteMapping("/cluster/pod/{namespace}/{name}")
-    public ResponseEntity<?> deletePod(@PathVariable String namespace,
-                                       @PathVariable String name) {
-        boolean deleted = service.deletePod(namespace, name);
-        return deleted
-                ? ResponseEntity.ok(Map.of("deleted", name, "namespace", namespace))
-                : ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("deleted", false, "pod", name));
+    @PostMapping("/cluster/pods/{namespace}")
+    public ResponseEntity<?> deletePods(@PathVariable String namespace,
+                                       @RequestBody List<String> names) {
+        for (String name: names){
+            boolean deleted = service.deletePod(namespace, name);
+            if (!deleted) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(Map.of("deleted", false, "pod", name));
+            }
+        }
+        return ResponseEntity.ok(Map.of("deleted", names));
     }
+
     @DeleteMapping("/cluster/reset")
     public ResponseEntity<?> resetCluster() {
         return ResponseEntity.ok(service.resetCluster());

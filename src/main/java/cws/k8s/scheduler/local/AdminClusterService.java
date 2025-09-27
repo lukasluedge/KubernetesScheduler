@@ -129,7 +129,23 @@ public class AdminClusterService {
         Node existing = client.nodes().withName(name).get();
 
         if (existing != null) {
-            client.nodes().withName(name).delete(); }
+            // Update existing node's resources and labels without deleting/recreating
+            if (existing.getStatus() == null) {
+                existing.setStatus(new NodeStatus());
+            }
+            existing.getStatus().setAllocatable(alloc);
+            existing.getStatus().setCapacity(capacity);
+
+            // Merge/overwrite labels: keep existing, override with provided
+            Map<String, String> lbl = existing.getMetadata().getLabels();
+            if (lbl == null) lbl = new HashMap<>();
+            lbl.putAll(effectiveLabels);
+            existing.getMetadata().setLabels(lbl);
+
+            client.nodes().resource(existing).update();
+            log.info("Updated mock node {} (cpu={}, memory={})", name, cpuVal, memVal);
+            return Map.of("updated", name, "cpu", cpuVal, "memory", memVal);
+        }
         // Node does not exist; create as before
         NodeBuilder nb = new NodeBuilder()
                 .withNewMetadata()
@@ -347,39 +363,39 @@ public class AdminClusterService {
     }
 
     public String resetCluster() {
-        // 1) Delete all Pods in all namespaces first (grace=0, background)
-        List<Pod> pods = client.pods().inAnyNamespace().list().getItems();
-        for (Pod pod : pods) {
-            client.pods()
-                    .inNamespace(pod.getMetadata().getNamespace())
-                    .withName(pod.getMetadata().getName())
-                    .withGracePeriod(0)
-                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
-                    .delete();
-        }
-        // Wait until all pods are gone (up to ~3 seconds)
+//         1) Delete all Pods in all namespaces first (grace=0, background)
+//        List<Pod> pods = client.pods().inAnyNamespace().list().getItems();
+//        for (Pod pod : pods) {
+//            client.pods()
+//                    .inNamespace(pod.getMetadata().getNamespace())
+//                    .withName(pod.getMetadata().getName())
+//                    .withGracePeriod(0)
+//                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
+//                    .delete();
+//        }
+//         Wait until all pods are gone (up to ~3 seconds)
         long waitUntil = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < waitUntil) {
             if (client.pods().inAnyNamespace().list().getItems().isEmpty()) break;
             try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
         }
-
-        // 2) Delete all Nodes after pods are gone
-        List<Node> nodes = client.nodes().list().getItems();
-        for (Node node : nodes) {
-            client.nodes().withName(node.getMetadata().getName())
-                    .withGracePeriod(0)
-                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
-                    .delete();
-        }
-        // Wait until all nodes are gone (up to ~3 seconds)
-        waitUntil = System.currentTimeMillis() + 3000;
-        while (System.currentTimeMillis() < waitUntil) {
-            if (client.nodes().list().getItems().isEmpty()) break;
-            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-        }
-
-        return "Reset complete";
+//
+//        // 2) Delete all Nodes after pods are gone
+//        List<Node> nodes = client.nodes().list().getItems();
+//        for (Node node : nodes) {
+//            client.nodes().withName(node.getMetadata().getName())
+//                    .withGracePeriod(0)
+//                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
+//                    .delete();
+//        }
+//        // Wait until all nodes are gone (up to ~3 seconds)
+//        waitUntil = System.currentTimeMillis() + 3000;
+//        while (System.currentTimeMillis() < waitUntil) {
+//            if (client.nodes().list().getItems().isEmpty()) break;
+//            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+//        }
+        return "no reset done";
+//        return "Reset complete";
     }
 
     // ---------------- Tracking ----------------

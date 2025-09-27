@@ -258,6 +258,9 @@ public class CWSKubernetesClient implements AutoCloseable {
             } else {
                 onAdd(newNode);
             }
+            // Notify all registered informables (schedulers) that resources may have changed
+            System.out.println("OnUpdate*********************************************************************\n**********************************************************\n************************************************");
+            kubernetesClient.informAllInformable();
         }
         @Override
         public void onDelete(Node node, boolean deletedFinalStateUnknown) {
