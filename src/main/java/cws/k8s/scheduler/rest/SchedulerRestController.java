@@ -548,6 +548,53 @@ public class SchedulerRestController {
 
     }
 
+    @PostMapping("/v1/file/{execution}/locations/{method}")
+    ResponseEntity<String> changeLocationsForFiles(@PathVariable String execution, @PathVariable String method, @RequestBody List<PathAttributes> paths) {
+
+        return changeLocationsForFilesOnNode(execution, method, null, paths);
+    }
+
+    @PostMapping("/v1/file/{execution}/locations/{method}/{node}")
+    ResponseEntity<String> changeLocationsForFilesOnNode(@PathVariable String execution, @PathVariable String method, @PathVariable(required = false) String node, @RequestBody List<PathAttributes> paths) {
+
+        log.info("Bulk change file locations request: method={} execution={} node={} count={}", method, execution, node, (paths == null ? 0 : paths.size()));
+
+        final Scheduler scheduler = schedulerHolder.get(execution);
+        if (!(scheduler instanceof SchedulerWithDaemonSet)) {
+            return noSchedulerFor(execution);
+        }
+
+        if (!"add".equals(method) && !"overwrite".equals(method)) {
+            return new ResponseEntity<>("Method not found: " + method, HttpStatus.NOT_FOUND);
+        }
+
+        final boolean overwrite = "overwrite".equals(method);
+
+        if (paths == null || paths.isEmpty()) {
+            return new ResponseEntity<>("No paths provided", HttpStatus.BAD_REQUEST);
+        }
+
+        try {
+            for (PathAttributes pa : paths) {
+                if (pa == null) continue;
+                ((SchedulerWithDaemonSet) scheduler).addFile(
+                        pa.getPath(),
+                        pa.getSize(),
+                        pa.getTimestamp(),
+                        pa.getLocationWrapperID(),
+                        overwrite,
+                        node
+                );
+            }
+        } catch (Exception e) {
+            log.warn("Bulk file registration failed: {}", e.getMessage(), e);
+            return new ResponseEntity<>("Failed to update file locations: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+
+        return new ResponseEntity<>(HttpStatus.OK);
+    }
+
+
     @Operation(summary = "Publish a file to a destination")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "Successfully assigned PublishItem",
