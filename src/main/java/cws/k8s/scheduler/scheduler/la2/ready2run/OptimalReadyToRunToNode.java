@@ -111,7 +111,10 @@ public class OptimalReadyToRunToNode implements ReadyToRunToNode {
 
         return taskNodeBoolVars.stream()
                 .filter( taskNodeBoolVar -> solver.booleanValue( taskNodeBoolVar.getBoolVar() ) )
-                .map( TaskNodeBoolVar::createAlignment )
+                .map( tnbv -> {
+                    log.debug("[LA2] Deciding node for task {} based on inputs: chosenNode={}", tnbv.getTaskInputsNodes().getTask().getConfig().getRunName(), tnbv.getNode().getNodeLocation().getIdentifier());
+                    return tnbv.createAlignment();
+                })
                 .collect( Collectors.toList() );
     }
 

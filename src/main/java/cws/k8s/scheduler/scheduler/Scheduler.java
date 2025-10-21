@@ -4,6 +4,7 @@ import cws.k8s.scheduler.client.CWSKubernetesClient;
 import cws.k8s.scheduler.client.CannotPatchException;
 import cws.k8s.scheduler.client.Informable;
 import cws.k8s.scheduler.dag.DAG;
+import cws.k8s.scheduler.local.SchedulerDataBuffer;
 import cws.k8s.scheduler.model.*;
 import cws.k8s.scheduler.prediction.MemoryScaler;
 import cws.k8s.scheduler.prediction.TaskScaler;
@@ -26,6 +27,7 @@ import java.util.*;
 @Slf4j
 public abstract class Scheduler implements Informable {
 
+    public SchedulerDataBuffer buffer = new SchedulerDataBuffer();
     //Visible variables
     @Getter
     private final String name;
@@ -159,6 +161,17 @@ public abstract class Scheduler implements Informable {
         //Use instance object that does not contain yet scheduled tasks
         postScheduling( unscheduledTasksCopy, getAvailableByNode( false ) );
         scheduleAdditionalTasks();
+        // Capture last planned assignments for this pass
+        Map<String,String> snapshot = new LinkedHashMap<>();
+        for (NodeTaskAlignment nta : taskNodeAlignment) {
+            try {
+                String runName = nta.task.getConfig().getRunName();
+                if (runName == null || runName.isBlank()) runName = nta.task.getConfig().getName();
+                String nodeName = nta.node != null && nta.node.getMetadata()!=null ? nta.node.getMetadata().getName() : null;
+                if (runName != null && nodeName != null) snapshot.put(runName, nodeName);
+            } catch (Exception ignore) {}
+        }
+        buffer.produce(snapshot);
         return unscheduledTasks.size() - taskNodeAlignment.size() + failure;
     }
 
@@ -589,8 +602,6 @@ public abstract class Scheduler implements Informable {
             return tasksById.get( id );
         }
     }
-
-
 
     /**
      * Close used resources

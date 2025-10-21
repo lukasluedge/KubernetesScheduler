@@ -16,6 +16,7 @@ import cws.k8s.scheduler.scheduler.la2.capacityavailable.SimpleCapacityAvailable
 import cws.k8s.scheduler.scheduler.la2.copyinadvance.CopyInAdvance;
 import cws.k8s.scheduler.scheduler.la2.copyinadvance.CopyInAdvanceNodeWithMostData;
 import cws.k8s.scheduler.scheduler.la2.copystrategy.CopyRunner;
+import cws.k8s.scheduler.scheduler.la2.copystrategy.LaListener;
 import cws.k8s.scheduler.scheduler.la2.copystrategy.ShellCopy;
 import cws.k8s.scheduler.scheduler.la2.ready2run.ReadyToRunToNode;
 import cws.k8s.scheduler.scheduler.schedulingstrategy.InputEntry;
@@ -164,6 +165,9 @@ public class LocationAwareSchedulerV2 extends SchedulerWithDaemonSet {
                 .parallelStream()
                 .map( task -> {
                     final TaskInputs inputsOfTask = extractInputsOfData( task );
+                    if (inputsOfTask != null) {
+                        log.debug("[LA2] Collected inputs for task {}: files={}", task.getConfig().getRunName(), inputsOfTask.getFiles().size());
+                    }
                     if ( inputsOfTask == null ) return null;
                     //all nodes that contain all files
                     final List<NodeWithAlloc> nodesWithAllData = availableByNode
@@ -178,6 +182,7 @@ public class LocationAwareSchedulerV2 extends SchedulerWithDaemonSet {
                                         && inputsOfTask.allFilesAreOnLocationAndNotOverwritten( node.getNodeLocation(), copyingFilesToNode.getAllFilesCurrentlyCopying() );
                             } )
                             .collect( Collectors.toList() );
+                    log.debug("[LA2] Nodes with all data for task {}: {}", task.getConfig().getRunName(), nodesWithAllData.stream().map(n -> n.getNodeLocation().getIdentifier()).collect(Collectors.toList()));
                     return new TaskInputsNodes( task, nodesWithAllData, inputsOfTask );
                 } )
                 .filter( Objects::nonNull )
@@ -271,11 +276,30 @@ public class LocationAwareSchedulerV2 extends SchedulerWithDaemonSet {
         final CopyTask copyTask = initializeCopyTask( nodeTaskFilesAlignment );
         //Files that will be copied
         reserveCopyTask( copyTask );
-        try {
-            copyRunner.startCopyTasks( copyTask, nodeTaskFilesAlignment );
-        } catch ( Exception e ) {
-            log.error( "Could not start copy task", e );
-            undoReserveCopyTask( copyTask );
+        // In mock mode, record planned copies for simulation and immediately mark as finished successfully
+        if ("mock".equals(System.getenv("MODE"))) {
+            try {
+                final String targetNode = nodeTaskFilesAlignment.node.getNodeLocation().getIdentifier();
+                copyTask.getInputFiles().forEach(f -> cws.k8s.scheduler.local.AdminClusterService.addPlannedCopy(f.getPath(), targetNode));
+
+                // Simulate immediate success; this updates hierarchy and prepared state
+                processCopyTaskFinished(copyTask, true);
+//                log.info("run name of current copy task {} task node?:{}, 2nd try:{}", copyTask.getTask().getConfig().getRunName(), copyTask.getTask().getNode(), copyTask.getTask().getNode() == null ? "null" : copyTask.getTask().getConfig().getRunName() );
+//                taskHasFinishedCopyTask(copyTask.getTask().getConfig().getRunName());
+                log.info("[MOCK] Marked copy task as finished successfully for task {} on node {} ({} files)",
+                        nodeTaskFilesAlignment.task.getConfig().getName(), targetNode, copyTask.getInputFiles().size());
+            } catch (Throwable t) {
+                log.warn("Failed to finalize mock copy: {}", t.toString());
+                // In mock mode, on any error we still undo reservation to avoid deadlocks
+                undoReserveCopyTask(copyTask);
+            }
+        } else {
+            try {
+                copyRunner.startCopyTasks(copyTask, nodeTaskFilesAlignment);
+            } catch (Exception e) {
+                log.error("Could not start copy task", e);
+                undoReserveCopyTask(copyTask);
+            }
         }
 
     }
@@ -317,6 +341,18 @@ public class LocationAwareSchedulerV2 extends SchedulerWithDaemonSet {
             freeLocations( copyTask.getAllLocationWrapper() );
             if( success ){
                 copyTask.getInputFiles().parallelStream().forEach( TaskInputFileLocationWrapper::success );
+                if (System.getenv("MODE").equals("mock")) {
+                    copyTask.getInputFiles().forEach(inputFile -> {
+                        var file = inputFile.getFile();
+                        var newWrapper = new LocationWrapper(
+                                copyTask.getNodeLocation(),
+                                System.currentTimeMillis(),
+                                inputFile.getWrapper().getSizeInBytes(),
+                                copyTask.getTask()
+                        );
+                        file.addOrUpdateLocation(false, newWrapper);
+                    });
+                }
                 removeFromCopyingToNode( copyTask.getTask(), copyTask.getNodeLocation(), copyTask.getFilesForCurrentNode() );
                 copyTask.getTask().preparedOnNode( copyTask.getNodeLocation() );
             } else {
@@ -439,6 +475,7 @@ public class LocationAwareSchedulerV2 extends SchedulerWithDaemonSet {
             if ( inputsOfTask.canRunOnLoc( node.getNodeLocation() ) && node.affinitiesMatch( task.getPod() ) ) {
                 final CurrentlyCopyingOnNode currentlyCopyingOnNode = currentlyCopying.get( node.getNodeLocation() );
                 final TaskNodeStats taskNodeStats = inputsOfTask.calculateMissingData( node.getNodeLocation(), currentlyCopyingOnNode );
+                log.debug("[LA2] Data stats for task " + task.getConfig().getRunName() + " on node " + node.getNodeLocation().getIdentifier() + ": onNode=" + (taskNodeStats==null?"n/a":taskNodeStats.getSizeOnNode()) + ", copying=" + (taskNodeStats==null?"n/a":taskNodeStats.getSizeCurrentlyCopying()) + ", remaining=" + (taskNodeStats==null?"n/a":taskNodeStats.getSizeRemaining()));
                 if ( taskNodeStats != null ) {
                     taskStats.add( node, taskNodeStats );
                     if ( taskNodeStats.allOnNodeOrCopying() ) {

@@ -6,10 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
-import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.Set;
+import java.util.*;
 
 /**
  * Thin REST adapter delegating all logic to AdminClusterService.
@@ -200,6 +197,22 @@ public class RestClusterInterface {
     public ResponseEntity<?> listPods() {
         return ResponseEntity.ok(service.listPods());
     }
+
+    @GetMapping("/cluster/task-node-mapping")
+    public ResponseEntity<?> getTaskToNodeMapping() {
+        return ResponseEntity.ok(service.getTaskToNodeMapping());
+    }
+
+    @GetMapping("/cluster/mapping/{execution}")
+    public ResponseEntity<?> getSchedulerMapping(@PathVariable String execution) throws InterruptedException {
+        return ResponseEntity.ok(service.getTaskToNodeMappingFromScheduler());
+    }
+
+    @GetMapping("/cluster/requestedCopies")
+    public ResponseEntity<?> requestCopies() {
+        return ResponseEntity.ok(service.getAndClearPendingCopyPlans());
+    }
+
 
     @GetMapping("/cluster/nodes/count")
     public ResponseEntity<?> countNodes() {

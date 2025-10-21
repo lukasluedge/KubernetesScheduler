@@ -59,6 +59,27 @@ public class CWSKubernetesClient implements AutoCloseable {
         initInformers();
     }
 
+    /**
+     * Aggressively clears internal state (informers, caches) so that a sequence of large runs can free memory.
+     * Intended primarily for mock/testing environments.
+     */
+    public void resetAllState() {
+        try { if (podInform != null) podInform.close(); } catch (Throwable ignore) {}
+        try { if (nodeInform != null) nodeInform.close(); } catch (Throwable ignore) {}
+        podInform = null;
+        nodeInform = null;
+        nodeHolder.clear();
+        // Rebuild node holder from current API state (should be empty after deletes) and restart informers
+        try {
+            for (Node node : this.nodes().list().getItems()) {
+                nodeHolder.put(node.getMetadata().getName(), new NodeWithAlloc(node, this));
+            }
+            initInformers();
+        } catch (Throwable t) {
+            log.warn("resetAllState: could not re-init informers: {}", t.toString());
+        }
+    }
+
     private void initInformers() {
         try {
             final List<Node> existing = this.nodes().list().getItems();

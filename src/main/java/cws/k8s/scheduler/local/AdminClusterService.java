@@ -3,8 +3,11 @@ package cws.k8s.scheduler.local;
 
 
 import cws.k8s.scheduler.client.CWSKubernetesClient;
+import cws.k8s.scheduler.model.NodeWithAlloc;
+import cws.k8s.scheduler.model.Task;
 import cws.k8s.scheduler.model.TaskConfig;
 import cws.k8s.scheduler.scheduler.Scheduler;
+import cws.k8s.scheduler.util.NodeTaskAlignment;
 import io.fabric8.kubernetes.api.model.*;
 import io.fabric8.kubernetes.client.dsl.*;
 import lombok.RequiredArgsConstructor;
@@ -22,12 +25,38 @@ import java.util.stream.Collectors;
 @Slf4j
 public class AdminClusterService {
 
+    // Global accumulator for planned copy tasks (filename -> target node). Drained by simulation.
+    private static final Map<String,String> PENDING_COPIES = Collections.synchronizedMap(new HashMap<>());
+
+    public static void addPlannedCopy(String filename, String targetNode){
+        if (filename == null || targetNode == null) return;
+        PENDING_COPIES.put(filename, targetNode);
+    }
+
+    public static Map<String,String> drainPlannedCopies(){
+        synchronized (PENDING_COPIES){
+            Map<String,String> out = new HashMap<>(PENDING_COPIES);
+            PENDING_COPIES.clear();
+            return out;
+        }
+    }
+
     private final CWSKubernetesClient client;
 
     // In-memory tracking (moved from controller)
     private final Set<String> trackedExecutions = ConcurrentHashMap.newKeySet();
 
-    // ---------------- Scheduler access (was reflection in controller) ----------------
+    // ---------------- Copy simulation support ----------------
+    /**
+     * Returns a list of tuples (filename, targetNode) for all files that should be copied since the last call.
+     * The list is cleared atomically.
+     */
+    public Map<String,String> getAndClearPendingCopyPlans(){
+        return drainPlannedCopies();
+    }
+
+
+     // ---------------- Scheduler access (was reflection in controller) ----------------
     @SuppressWarnings("unchecked")
     private Map<String, Scheduler> schedulerHolder() {
         try {
@@ -290,6 +319,60 @@ public class AdminClusterService {
         }).collect(Collectors.toList());
     }
 
+    public Map<String, Object> getTaskToNodeMappingFromScheduler() throws InterruptedException {
+        Map<String,String> schedMap =  SchedulerDataBuffer.consumeAllBlocking();
+        System.out.println("getTaskToNodeMappingFromScheduler: " + schedMap);
+        if (!schedMap.isEmpty()) {
+            return Map.of(
+                    "status", "ok",
+                    "source", "scheduler",
+                    "mapping", new LinkedHashMap<>(schedMap)
+            );
+        }
+        // fallback to pods cache
+        return Map.of(
+                "status", "ok",
+                "source", "pods",
+                "mapping", getTaskToNodeMapping()
+        );
+    }
+
+    public Map<String, String> getTaskToNodeMapping() {
+        // Build a mapping from task identifier (prefer runName) to nodeName using pod informer/cache.
+        // This avoids active polling of each pod and leverages the client-side cache maintained by CWSKubernetesClient.
+        Map<String, String> mapping = new LinkedHashMap<>();
+        try {
+            List<Pod> pods = client.pods().inAnyNamespace().list().getItems();
+            for (Pod p : pods) {
+                if (p == null || p.getSpec() == null) continue;
+                String node = p.getSpec().getNodeName();
+                if (node == null || node.isBlank()) continue; // not scheduled yet
+                if (p.getStatus() != null) {
+                    String phase = p.getStatus().getPhase();
+                    if ("Succeeded".equalsIgnoreCase(phase) || "Failed".equalsIgnoreCase(phase)) {
+                        // Skip finished pods for live mapping
+                        continue;
+                    }
+                }
+                String runName = null;
+                if (p.getMetadata() != null) {
+                    Map<String, String> labels = p.getMetadata().getLabels();
+                    if (labels != null) {
+                        runName = labels.getOrDefault("runName", null);
+                        if (runName == null) runName = labels.getOrDefault("commonworkflowscheduler/runName", null);
+                    }
+                    if (runName == null) runName = p.getMetadata().getName();
+                }
+                if (runName != null) {
+                    mapping.put(runName, node);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("getTaskToNodeMapping: failed to build mapping: {}", e.toString());
+        }
+        return mapping;
+    }
+
     public int countNodes() {
         return client.nodes().list().getItems().size();
     }
@@ -363,39 +446,61 @@ public class AdminClusterService {
     }
 
     public String resetCluster() {
-//         1) Delete all Pods in all namespaces first (grace=0, background)
-        List<Pod> pods = client.pods().inAnyNamespace().list().getItems();
-        for (Pod pod : pods) {
-            client.pods()
-                    .inNamespace(pod.getMetadata().getNamespace())
-                    .withName(pod.getMetadata().getName())
-                    .withGracePeriod(0)
-                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
-                    .delete();
+        // Aggressively reset all mock-cluster state and free memory to mimic a fresh start
+        try {
+            // 1) Stop and clear all registered schedulers to free threads and references
+            try {
+                Class<?> restController = Class.forName("cws.k8s.scheduler.rest.SchedulerRestController");
+                java.lang.reflect.Field holder = restController.getDeclaredField("schedulerHolder");
+                holder.setAccessible(true);
+                Map<String, Scheduler> schedulers = (Map<String, Scheduler>) holder.get(null);
+                if (schedulers != null) {
+                    for (Scheduler s : new ArrayList<>(schedulers.values())) {
+                        try {
+                            client.removeInformable(s);
+                        } catch (Exception ignore) { }
+                        try {
+                            s.close();
+                        } catch (Exception ignore) { }
+                    }
+                    schedulers.clear();
+                }
+            } catch (Throwable t) {
+                log.warn("resetCluster: could not stop schedulers: {}", t.toString());
+            }
+
+            // 2) Delete namespaced resources first that we can access via our wrapper (pods)
+            try {
+                client.pods().inAnyNamespace().withGracePeriod(0).withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
+            } catch (Exception e) { log.debug("pods delete failed: {}", e.toString()); }
+
+            // Wait shortly for cleanup
+            long waitUntil = System.currentTimeMillis() + 3000;
+            while (System.currentTimeMillis() < waitUntil) {
+                try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+            }
+
+            // 3) Delete cluster-scoped resources last (nodes)
+            try { client.nodes().withPropagationPolicy(DeletionPropagation.BACKGROUND).delete(); } catch (Exception ignore) {}
+
+            // 4) Clear in-memory tracking in this service
+            trackedExecutions.clear();
+
+            // 5) Attempt to hard reset the underlying client caches/informers if supported
+            try {
+                client.resetAllState();
+            } catch (Throwable ignore) {
+                // ignore if not available
+            }
+
+            // 6) Hint GC after releasing references
+            try { System.gc(); } catch (Throwable ignore) { }
+
+            return "Reset complete";
+        } catch (Exception e) {
+            log.error("resetCluster failed", e);
+            return "Reset incomplete: " + e.getMessage();
         }
-//         Wait until all pods are gone (up to ~3 seconds)
-        long waitUntil = System.currentTimeMillis() + 3000;
-        while (System.currentTimeMillis() < waitUntil) {
-            if (client.pods().inAnyNamespace().list().getItems().isEmpty()) break;
-            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-        }
-//
-//        // 2) Delete all Nodes after pods are gone
-        List<Node> nodes = client.nodes().list().getItems();
-        for (Node node : nodes) {
-            client.nodes().withName(node.getMetadata().getName())
-                    .withGracePeriod(0)
-                    .withPropagationPolicy(DeletionPropagation.BACKGROUND)
-                    .delete();
-        }
-//        // Wait until all nodes are gone (up to ~3 seconds)
-        waitUntil = System.currentTimeMillis() + 3000;
-        while (System.currentTimeMillis() < waitUntil) {
-            if (client.nodes().list().getItems().isEmpty()) break;
-            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-        }
-//        return "no reset done";
-        return "Reset complete";
     }
 
     // ---------------- Tracking ----------------
